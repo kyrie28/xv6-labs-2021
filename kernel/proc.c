@@ -14,6 +14,7 @@ struct proc *initproc;
 
 int nextpid = 1;
 struct spinlock pid_lock;
+static uint64 nproc;
 
 extern void forkret(void);
 static void freeproc(struct proc *p);
@@ -54,6 +55,7 @@ procinit(void)
       initlock(&p->lock, "proc");
       p->kstack = KSTACK((int) (p - proc));
   }
+  nproc = 0;
 }
 
 // Must be called with interrupts disabled,
@@ -119,6 +121,7 @@ allocproc(void)
 found:
   p->pid = allocpid();
   p->state = USED;
+  nproc++;
 
   // Allocate a trapframe page.
   if((p->trapframe = (struct trapframe *)kalloc()) == 0){
@@ -164,6 +167,7 @@ freeproc(struct proc *p)
   p->killed = 0;
   p->xstate = 0;
   p->state = UNUSED;
+  nproc--;
 }
 
 // Create a user page table for a given process,
@@ -302,6 +306,8 @@ fork(void)
   np->cwd = idup(p->cwd);
 
   safestrcpy(np->name, p->name, sizeof(p->name));
+
+  np->tracemask = p->tracemask;
 
   pid = np->pid;
 
@@ -653,4 +659,10 @@ procdump(void)
     printf("%d %s %s", p->pid, state, p->name);
     printf("\n");
   }
+}
+
+uint64
+get_nproc(void)
+{
+  return nproc;
 }
