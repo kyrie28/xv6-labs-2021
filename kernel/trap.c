@@ -5,6 +5,7 @@
 #include "spinlock.h"
 #include "proc.h"
 #include "defs.h"
+#include "cow.h"
 
 struct spinlock tickslock;
 uint ticks;
@@ -65,6 +66,41 @@ usertrap(void)
     intr_on();
 
     syscall();
+  } else if (r_scause() == 15) {
+    // Store/AMO page fault
+    
+    uint64 va = PGROUNDDOWN(r_stval());
+    uint64 pa;
+    pte_t *pte;
+    char *mem;
+    uint flags;
+    if (va >= MAXVA){
+      printf("usertrap(): invalid address\n"); p->killed = 1;
+    } else if ((pte = walk(p->pagetable, va, 0)) == 0) {
+      printf("usertrap(): walk(): failed\n"); p->killed = 1;
+    } else if ((*pte & PTE_COW)) {
+      // perform copy-on-write
+      if (!((*pte & PTE_V) && (*pte & PTE_U) && !(*pte & PTE_W))) {
+        printf("usertrap(): wrong PTE flags\n"); p->killed = 1;
+      } else if ((mem = kalloc()) == 0) {
+        printf("usertrap(): kalloc(): failed\n"); p->killed = 1;
+      } else {
+        pa = PTE2PA(*pte);
+        memmove(mem, (char*)pa, PGSIZE);
+        flags = PTE_FLAGS(*pte);
+        flags |= PTE_W; // set write bit
+        flags &= ~PTE_COW; // clear COW bit
+        uvmunmap(p->pagetable, va, 1, 1);
+        if (mappages(p->pagetable, va, PGSIZE, (uint64)mem, flags) != 0) {
+          printf("usertrap(): mappages(): failed\n"); p->killed = 1;
+        }
+      }            
+    } else {
+      // unknown page fault
+      printf("usertrap(): unexpected scause %p pid=%d\n", r_scause(), p->pid);
+      printf("            sepc=%p stval=%p\n", r_sepc(), r_stval());
+      p->killed = 1;
+    }
   } else if((which_dev = devintr()) != 0){
     // ok
   } else {

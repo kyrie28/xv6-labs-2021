@@ -8,6 +8,9 @@
 #include "spinlock.h"
 #include "riscv.h"
 #include "defs.h"
+#include "cow.h"
+
+int kpage_refcnt_arr[RCA_SIZE]; // reference count array for physical memory
 
 void freerange(void *pa_start, void *pa_end);
 
@@ -76,7 +79,9 @@ kalloc(void)
     kmem.freelist = r->next;
   release(&kmem.lock);
 
-  if(r)
+  if(r) {
     memset((char*)r, 5, PGSIZE); // fill with junk
+    kpage_refcnt_arr[PA2RCAI(r)] = 1; // set reference count to 1
+  }
   return (void*)r;
 }
