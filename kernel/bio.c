@@ -34,11 +34,6 @@ struct bucket {
 struct {
   struct spinlock lock;
   struct buf buf[NBUF];
-
-  // Linked list of all buffers, through prev/next.
-  // Sorted by how recently the buffer was used.
-  // head.next is most recent, head.prev is least.
-  struct buf head;
   struct bucket buckets[NBUCKET];
 } bcache;
 
@@ -49,21 +44,19 @@ binit(void)
 
   initlock(&bcache.lock, "bcache");
 
-  // Create linked list of buffers
-  bcache.head.prev = &bcache.head;
-  bcache.head.next = &bcache.head;
-  for(b = bcache.buf; b < bcache.buf+NBUF; b++){
-    b->next = bcache.head.next;
-    b->prev = &bcache.head;
-    initsleeplock(&b->lock, "buffer");
-    bcache.head.next->prev = b;
-    bcache.head.next = b;
-  }
-
   for (int i = 0; i < NBUCKET; i++) {
     initlock(&bcache.buckets[i].lock, "bcache.bucket");
     bcache.buckets[i].head.prev = &bcache.buckets[i].head;
     bcache.buckets[i].head.next = &bcache.buckets[i].head;
+  }
+
+  // Create linked list of buffers
+  for (b = bcache.buf; b < bcache.buf+NBUF; b++) {
+    b->next = bcache.buckets[0].head.next;
+    b->prev = &bcache.buckets[0].head;
+    initsleeplock(&b->lock, "buffer");
+    bcache.buckets[0].head.next->prev = b;
+    bcache.buckets[0].head.next = b;
   }
 }
 
@@ -86,28 +79,59 @@ bget(uint dev, uint blockno)
       return b;
     }
   }
+  release(&bcache.buckets[hash].lock);
 
   // Not cached.
   // Recycle the least recently used (LRU) unused buffer.
   acquire(&bcache.lock);
-  for(b = bcache.head.prev; b != &bcache.head; b = b->prev){
-    if(b->refcnt == 0) {
-      b->next->prev = b->prev;
-      b->prev->next = b->next;
-      b->next = bcache.buckets[hash].head.next;
-      b->prev = &bcache.buckets[hash].head;
-      bcache.buckets[hash].head.next->prev = b;
-      bcache.buckets[hash].head.next = b;
-      b->dev = dev;
-      b->blockno = blockno;
-      b->valid = 0;
-      b->refcnt = 1;
-      release(&bcache.buckets[hash].lock);
-      release(&bcache.lock);
-      acquiresleep(&b->lock);
-      return b;
+
+  b = 0;
+  int membucket = 0;
+  uint memtimestamp = (uint)-1;
+  for (int i = 0; i < NBUCKET; i++) {
+    acquire(&bcache.buckets[i].lock);
+    for (struct buf *buf = bcache.buckets[i].head.prev;
+         buf != &bcache.buckets[i].head;
+         buf = buf->prev) {
+      if (buf->refcnt == 0 && memtimestamp > buf->timestamp) {
+        buf->refcnt++;
+        if (b) {
+          release(&bcache.buckets[i].lock);
+          acquire(&bcache.buckets[membucket].lock);
+          b->refcnt--;
+          release(&bcache.buckets[membucket].lock);
+          acquire(&bcache.buckets[i].lock);
+        }
+        b = buf;
+        membucket = i;
+        memtimestamp = buf->timestamp;
+      }
     }
+    release(&bcache.buckets[i].lock);
   }
+
+  if (b) {
+    acquire(&bcache.buckets[membucket].lock);
+    b->next->prev = b->prev;
+    b->prev->next = b->next;
+    release(&bcache.buckets[membucket].lock);
+
+    acquire(&bcache.buckets[hash].lock);
+    b->next = bcache.buckets[hash].head.next;
+    b->prev = &bcache.buckets[hash].head;
+    bcache.buckets[hash].head.next->prev = b;
+    bcache.buckets[hash].head.next = b;
+    b->dev = dev;
+    b->blockno = blockno;
+    b->valid = 0;
+    release(&bcache.buckets[hash].lock);
+    
+    release(&bcache.lock);
+    
+    acquiresleep(&b->lock);
+    return b;
+  }
+  
   panic("bget: no buffers");
 }
 
